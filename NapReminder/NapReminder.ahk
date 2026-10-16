@@ -13,12 +13,21 @@ global reminderTitle := "该休息啦！"
 global reminderMessage := "请离开屏幕，活动一下眼睛和身体。"
 global buttonText := "知道了"
 global gradientColors := []
+global reminderMenu := 0
+global nextReminderAt := 0
+global trayCountdownLabel := "Next Nap"
+
+; 使用参考脚本中的 Windows 深色主题设置，让通知区域菜单采用深色样式。
+SetTrayMenuDarkMode()
 
 ; 启动时读取脚本所在目录的配置文件。
 LoadConfig()
 
+; 创建带应用图标和动态倒计时的通知区域菜单。
+CreateReminderTrayMenu()
+
 ; 第一轮提醒在启动后经过配置的间隔时间触发。
-SetTimer(ShowBreakReminder, -(nextIntervalSeconds * 1000))
+ScheduleNextReminder()
 
 /**
  * 从脚本所在目录读取提醒参数、文本和渐变色配置。
@@ -39,6 +48,115 @@ LoadConfig() {
 
     ; 51 个透明度级别对应 0 到 255，按配置换算每次动画的计时间隔。
     fadeTickMilliseconds := Max(10, Round(fadeDurationSeconds * 1000 / 51))
+}
+
+/**
+ * 为当前进程启用 Windows 深色菜单主题并刷新已缓存的菜单主题。
+ * <p>
+ * 深色菜单 API 仅在 Windows 10 1809 及更高版本中可用。
+ *
+ * @author Codex
+ * @date 2026/10/14
+ * @version 1.0.0
+ */
+SetTrayMenuDarkMode() {
+    if VerCompare(A_OSVersion, "10.0.17763") < 0
+        return
+
+    uxtheme := DllCall("kernel32\GetModuleHandle", "Str", "uxtheme", "Ptr")
+    if !uxtheme
+        return
+
+    setPreferredAppMode := DllCall("kernel32\GetProcAddress", "Ptr", uxtheme, "Ptr", 135, "Ptr")
+    flushMenuThemes := DllCall("kernel32\GetProcAddress", "Ptr", uxtheme, "Ptr", 136, "Ptr")
+    if !setPreferredAppMode || !flushMenuThemes
+        return
+
+    ; 参考 DarkMode.scriptlet 使用 ForceDark 模式刷新进程菜单主题。
+    DllCall(setPreferredAppMode, "Int", 2)
+    DllCall(flushMenuThemes)
+}
+
+/**
+ * 创建仅包含标题、动态倒计时和退出项的自定义通知区域菜单。
+ * <p>
+ *
+ * @author Codex
+ * @date 2026/10/14
+ * @version 1.0.0
+ */
+CreateReminderTrayMenu() {
+    global reminderMenu, trayCountdownLabel
+
+    iconPath := A_ScriptDir "\icon\NapReminder.ico"
+    reminderMenu := A_TrayMenu
+    reminderMenu.Delete()
+    reminderMenu.Add("NapReminder", NoOpMenuItem)
+    if FileExist(iconPath)
+        reminderMenu.SetIcon("NapReminder", iconPath)
+    trayCountdownLabel := "Next Nap"
+    reminderMenu.Add(trayCountdownLabel, NoOpMenuItem)
+    reminderMenu.Add("Exit", (*) => ExitApp())
+    UpdateReminderTrayCountdown()
+}
+
+/**
+ * 为不带点击事件的通知区域菜单项提供空回调。
+ * <p>
+ *
+ * @param item 菜单项事件参数
+ * @author Codex
+ * @date 2026/10/14
+ * @version 1.0.0
+ */
+NoOpMenuItem(*) {
+}
+
+/**
+ * 将下一轮提醒时间设为指定的秒数并启动一次性触发计时器。
+ * <p>
+ *
+ * @author Codex
+ * @date 2026/10/14
+ * @version 1.0.0
+ */
+ScheduleNextReminder() {
+    global nextIntervalSeconds, nextReminderAt
+
+    nextReminderAt := A_TickCount + (nextIntervalSeconds * 1000)
+    SetTimer(ShowBreakReminder, -(nextIntervalSeconds * 1000))
+    SetTimer(UpdateReminderTrayCountdown, 1000)
+    UpdateReminderTrayCountdown()
+}
+
+/**
+ * 按剩余秒数刷新通知区域菜单中的下一次休息倒计时。
+ * <p>
+ * 只显示非零的分钟或秒，倒计时结束时保留 Next Nap 标签。
+ *
+ * @author Codex
+ * @date 2026/10/14
+ * @version 1.0.0
+ */
+UpdateReminderTrayCountdown() {
+    global reminderMenu, nextReminderAt, trayCountdownLabel
+
+    if !IsObject(reminderMenu) || nextReminderAt = 0
+        return
+
+    remainingSeconds := Max(0, Ceil((nextReminderAt - A_TickCount) / 1000))
+    remainingMinutes := remainingSeconds // 60
+    remainingSeconds := Mod(remainingSeconds, 60)
+    countdownText := "Next Nap"
+
+    if remainingMinutes > 0
+        countdownText .= " " remainingMinutes "Min"
+    if remainingSeconds > 0
+        countdownText .= " " remainingSeconds "Sec"
+    if countdownText != trayCountdownLabel {
+        reminderMenu.Rename(trayCountdownLabel, countdownText)
+        trayCountdownLabel := countdownText
+    }
 }
 
 /**
@@ -269,8 +387,8 @@ FadeOutReminder() {
         reminderState := "hidden"
         reminderAlpha := 0
 
-        ; 只有淡出完成后，才开始下一轮配置间隔倒计时。
-        SetTimer(ShowBreakReminder, -(nextIntervalSeconds * 1000))
+        ; 只有淡出完成后，才开始下一轮配置间隔倒计时并刷新菜单。
+        ScheduleNextReminder()
         return
     }
 
@@ -278,4 +396,6 @@ FadeOutReminder() {
 }
 
 ; 提醒窗口显示时，也可以按 Esc 关闭它。
+#HotIf reminderVisible
 Esc::CloseReminder()
+#HotIf
